@@ -2,10 +2,13 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$here = if ($PSScriptRoot) {
-    $PSScriptRoot
+$here = $null
+if ($PSScriptRoot) {
+    $here = $PSScriptRoot
+} elseif ($MyInvocation.MyCommand.Path) {
+    $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 } else {
-    Split-Path -Parent $MyInvocation.MyCommand.Path
+    $here = (Get-Location).Path
 }
 
 $exe = Join-Path $here 'FastKill.exe'
@@ -16,9 +19,20 @@ if (Test-Path -LiteralPath $exe) {
     exit $proc.ExitCode
 }
 
-if (Test-Path -LiteralPath $ps1) {
+# Avoid re-entering this launcher if we are FASTKILL.ps1 itself
+$self = $MyInvocation.MyCommand.Path
+if ((Test-Path -LiteralPath $ps1) -and ($self -ne $ps1)) {
     & $ps1
     exit $LASTEXITCODE
 }
 
-throw "Not found: FastKill.exe or FASTKILL.ps1 in '$here'"
+throw @"
+FastKill.exe not found in: $here
+
+How to run:
+1. Put this .ps1 in the same folder as FastKill.exe
+2. Run locally, for example:
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\FastKill-Launcher.ps1
+
+Do not use: iex (irm 'https://...')
+"@
