@@ -1,11 +1,12 @@
-# iex (irm 'https://cdn.jsdelivr.net/gh/lubyralph6-maker/FASTKILL@main/FASTKILL.ps1')
+# iex (irm 'https://raw.githubusercontent.com/lubyralph6-maker/FASTKILL/main/FASTKILL.ps1')
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $FkCdn  = 'https://cdn.jsdelivr.net/gh/lubyralph6-maker/FASTKILL@main'
+$FkRaw  = 'https://raw.githubusercontent.com/lubyralph6-maker/FASTKILL/main'
 $FkExe  = 'FastKill.exe'
-$FkLink = "$FkCdn/FASTKILL.ps1"
+$FkLink = "$FkRaw/FASTKILL.ps1"
 
 try {
     if (-not (Test-Path 'HKCU:\Software\Microsoft\PowerShell\PSReadLine')) {
@@ -17,13 +18,14 @@ try {
 } catch {}
 
 $hdr = @{
-    'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) FASTKILL/2.0'
+    'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) FASTKILL/2.1'
     'Accept'     = '*/*'
 }
 
 $urls = @(
     "$FkCdn/$FkExe",
     "$FkCdn/bin/$FkExe",
+    "$FkRaw/$FkExe",
     "https://github.com/lubyralph6-maker/FASTKILL/raw/main/$FkExe",
     "https://github.com/lubyralph6-maker/FASTKILL/raw/main/bin/$FkExe"
 )
@@ -33,7 +35,7 @@ $exePath = $null
 $proc    = $null
 
 $legacyDir = Join-Path $env:LOCALAPPDATA 'FASTKILL'
-if (Test-Path -LiteralPath $legacyDir) {
+if (-not [string]::IsNullOrWhiteSpace($legacyDir) -and (Test-Path -LiteralPath $legacyDir)) {
     Remove-Item -LiteralPath $legacyDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
@@ -42,6 +44,7 @@ function Write-Fk([string]$Text, [string]$Color = 'White') {
 }
 
 function Test-FkExe([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
     try {
         $f = Get-Item -LiteralPath $Path
@@ -59,7 +62,8 @@ function Test-FkExe([string]$Path) {
 }
 
 function Remove-FkWorkDir([string]$Path) {
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return }
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    if (-not (Test-Path -LiteralPath $Path)) { return }
     try {
         Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue |
             ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
@@ -76,12 +80,18 @@ function Invoke-FkDownload {
 }
 
 function Get-FkLocalExe {
-    foreach ($local in @(
-        (Join-Path $PSScriptRoot "bin\$FkExe"),
-        (Join-Path $PSScriptRoot $FkExe),
-        (Join-Path (Get-Location) "bin\$FkExe"),
-        (Join-Path (Get-Location) $FkExe)
-    )) {
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        $candidates += (Join-Path $PSScriptRoot "bin\$FkExe")
+        $candidates += (Join-Path $PSScriptRoot $FkExe)
+    }
+    $here = (Get-Location).Path
+    if (-not [string]::IsNullOrWhiteSpace($here)) {
+        $candidates += (Join-Path $here "bin\$FkExe")
+        $candidates += (Join-Path $here $FkExe)
+    }
+
+    foreach ($local in $candidates) {
         if (Test-FkExe $local) {
             Write-Fk "Using local: $local" Green
             return (Resolve-Path -LiteralPath $local).Path
@@ -91,6 +101,10 @@ function Get-FkLocalExe {
 }
 
 function Get-FkTempExe {
+    if ([string]::IsNullOrWhiteSpace($env:TEMP)) {
+        throw 'TEMP folder not found'
+    }
+
     $script:workDir = Join-Path $env:TEMP ("FK_" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $workDir -Force | Out-Null
 
@@ -144,6 +158,10 @@ try {
         $exePath = Get-FkTempExe
     }
 
+    if ([string]::IsNullOrWhiteSpace($exePath)) {
+        throw 'FastKill.exe not found'
+    }
+
     Write-Fk 'Starting FASTKILL (Administrator)...' Cyan
     $proc = Start-Process -FilePath $exePath -Verb RunAs -PassThru
     if ($null -eq $proc) { throw 'RunAs failed - click Yes on UAC' }
@@ -157,7 +175,7 @@ catch {
     Write-Fk "Run: iex (irm '$FkLink')" Yellow
 }
 finally {
-    if ($workDir) {
+    if (-not [string]::IsNullOrWhiteSpace($workDir)) {
         if ($proc -and -not $proc.HasExited) {
             Start-Sleep -Seconds 2
         }
