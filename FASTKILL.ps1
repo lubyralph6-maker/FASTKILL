@@ -1,97 +1,171 @@
-# FASTKILL launcher - works with:
-#   powershell -ExecutionPolicy Bypass -File .\FASTKILL.ps1
-#   powershell -ExecutionPolicy Bypass -File .\bin\FASTKILL.ps1
-#   iex (irm 'https://raw.githubusercontent.com/lubyralph6-maker/FASTKILL/main/FASTKILL.ps1')
+# iex (irm 'https://cdn.jsdelivr.net/gh/lubyralph6-maker/FASTKILL@main/FASTKILL.ps1')
 
 $ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$exeName = 'FastKill.exe'
-$installDir = Join-Path $env:LOCALAPPDATA 'FASTKILL'
-$exePath = Join-Path $installDir $exeName
-$exeUrl = 'https://raw.githubusercontent.com/lubyralph6-maker/FASTKILL/main/FastKill.exe'
+$FkCdn  = 'https://cdn.jsdelivr.net/gh/lubyralph6-maker/FASTKILL@main'
+$FkExe  = 'FastKill.exe'
+$FkLink = "$FkCdn/FASTKILL.ps1"
 
-function Write-Status([string]$Text, [string]$Color = 'White') {
+try {
+    if (-not (Test-Path 'HKCU:\Software\Microsoft\PowerShell\PSReadLine')) {
+        New-Item 'HKCU:\Software\Microsoft\PowerShell\PSReadLine' -Force | Out-Null
+    }
+    Set-ItemProperty 'HKCU:\Software\Microsoft\PowerShell\PSReadLine' HistorySaveStyle 2 -Type DWord -Force
+    Import-Module PSReadLine -ErrorAction SilentlyContinue | Out-Null
+    Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction SilentlyContinue
+} catch {}
+
+$hdr = @{
+    'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) FASTKILL/2.0'
+    'Accept'     = '*/*'
+}
+
+$urls = @(
+    "$FkCdn/$FkExe",
+    "$FkCdn/bin/$FkExe",
+    "https://github.com/lubyralph6-maker/FASTKILL/raw/main/$FkExe",
+    "https://github.com/lubyralph6-maker/FASTKILL/raw/main/bin/$FkExe"
+)
+
+$workDir = $null
+$exePath = $null
+$proc    = $null
+
+$legacyDir = Join-Path $env:LOCALAPPDATA 'FASTKILL'
+if (Test-Path -LiteralPath $legacyDir) {
+    Remove-Item -LiteralPath $legacyDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Write-Fk([string]$Text, [string]$Color = 'White') {
     Write-Host $Text -ForegroundColor $Color
 }
 
-function Get-LocalExeNearScript {
-    $roots = @()
-    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
-        $roots += $PSScriptRoot
+function Test-FkExe([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        $f = Get-Item -LiteralPath $Path
+        if ($f.Length -lt 4MB) { return $false }
+        $b = [IO.File]::ReadAllBytes($Path)
+        if ($b.Length -lt 512) { return $false }
+        if ([Text.Encoding]::ASCII.GetString($b, 0, 2) -ne 'MZ') { return $false }
+        $o = [BitConverter]::ToInt32($b, 0x3C)
+        if ($o -lt 0 -or ($o + 0x200) -gt $b.Length) { return $false }
+        if ([Text.Encoding]::ASCII.GetString($b, $o, 4) -ne "PE`0`0") { return $false }
+        return ([BitConverter]::ToUInt16($b, $o + 4) -eq 0x8664)
+    } catch {
+        return $false
     }
-    $roots += (Get-Location).Path
+}
 
-    foreach ($root in $roots | Select-Object -Unique) {
-        $candidates = @(
-            (Join-Path $root $exeName),
-            (Join-Path $root 'bin\FastKill.exe'),
-            (Join-Path $root 'bin\FASTKILL.exe')
-        )
-        foreach ($candidate in $candidates) {
-            if (Test-Path -LiteralPath $candidate) {
-                return (Resolve-Path -LiteralPath $candidate).Path
+function Remove-FkWorkDir([string]$Path) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return }
+    try {
+        Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+function Invoke-FkDownload {
+    param([string]$Url, [string]$OutFile)
+
+    $wc = New-Object System.Net.WebClient
+    foreach ($key in $hdr.Keys) { $wc.Headers[$key] = $hdr[$key] }
+    $wc.DownloadFile($Url, $OutFile)
+}
+
+function Get-FkLocalExe {
+    foreach ($local in @(
+        (Join-Path $PSScriptRoot "bin\$FkExe"),
+        (Join-Path $PSScriptRoot $FkExe),
+        (Join-Path (Get-Location) "bin\$FkExe"),
+        (Join-Path (Get-Location) $FkExe)
+    )) {
+        if (Test-FkExe $local) {
+            Write-Fk "Using local: $local" Green
+            return (Resolve-Path -LiteralPath $local).Path
+        }
+    }
+    return $null
+}
+
+function Get-FkTempExe {
+    $script:workDir = Join-Path $env:TEMP ("FK_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+
+    $tmp = Join-Path $workDir "$FkExe.download"
+    $out = Join-Path $workDir $FkExe
+    $lastError = 'Download failed'
+
+    foreach ($url in $urls) {
+        foreach ($try in 1..4) {
+            try {
+                Write-Fk "Downloading ($try/4): $url" Cyan
+                if (Test-Path -LiteralPath $tmp) {
+                    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                }
+
+                try {
+                    Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -Headers $hdr -TimeoutSec 120
+                } catch {
+                    Invoke-FkDownload -Url $url -OutFile $tmp
+                }
+
+                if (-not (Test-FkExe $tmp)) {
+                    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                    throw 'Downloaded file is not a valid 64-bit exe'
+                }
+
+                if (Test-Path -LiteralPath $out) {
+                    Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+                }
+                Move-Item -LiteralPath $tmp -Destination $out -Force
+
+                Write-Fk "Downloaded OK ($((Get-Item -LiteralPath $out).Length) bytes)" Green
+                return $out
+            } catch {
+                $lastError = $_.Exception.Message
+                $wait = if ($lastError -match '429|Too Many Requests') { 15 * $try } else { 5 * $try }
+                Write-Fk "Retry in ${wait}s: $lastError" Yellow
+                Start-Sleep -Seconds $wait
             }
         }
     }
 
-    return $null
-}
-
-function Get-CachedOrDownloadedExe {
-    if (-not (Test-Path -LiteralPath $installDir)) {
-        New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-    }
-
-    if (Test-Path -LiteralPath $exePath) {
-        return $exePath
-    }
-
-    Write-Status "Downloading: $exeUrl" Cyan
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $exeUrl -OutFile $exePath -UseBasicParsing
-    Write-Status 'Downloaded' Green
-
-    if (-not (Test-Path -LiteralPath $exePath)) {
-        throw 'Download failed - FastKill.exe not found after download.'
-    }
-
-    return $exePath
-}
-
-function Resolve-ExePath {
-    $local = Get-LocalExeNearScript
-    if ($null -ne $local) {
-        return $local
-    }
-    return Get-CachedOrDownloadedExe
+    throw $lastError
 }
 
 try {
-    $targetExe = Resolve-ExePath
-    if ([string]::IsNullOrWhiteSpace($targetExe)) {
-        throw 'Could not resolve FastKill.exe path.'
+    $local = Get-FkLocalExe
+    if ($local) {
+        $exePath = $local
+    } else {
+        $exePath = Get-FkTempExe
     }
 
-    Write-Status "Using: $targetExe" Green
-    Write-Status 'Starting FASTKILL V.1 (Administrator)...' Cyan
-
-    $proc = Start-Process -FilePath $targetExe -Verb RunAs -PassThru
-    if ($null -eq $proc) {
-        throw 'Start-Process returned null.'
-    }
-
-    Start-Sleep -Seconds 2
-    if ($proc.HasExited) {
-        throw "FastKill closed immediately (exit $($proc.ExitCode)). Run as Administrator and check antivirus exclusion."
-    }
-
-    Write-Status 'FASTKILL is running.' Green
-    Write-Status 'Finished' Green
+    Write-Fk 'Starting FASTKILL (Administrator)...' Cyan
+    $proc = Start-Process -FilePath $exePath -Verb RunAs -PassThru
+    if ($null -eq $proc) { throw 'RunAs failed - click Yes on UAC' }
+    Start-Sleep -Seconds 3
+    if ($proc.HasExited) { throw "FastKill closed immediately (exit $($proc.ExitCode))" }
+    Write-Fk 'FASTKILL running' Green
 }
 catch {
-    Write-Status "Error: $($_.Exception.Message)" Red
-    Write-Status 'Fix: upload FastKill.exe to GitHub main branch, or copy exe + ps1 in same folder.' Yellow
+    Write-Fk "Error: $($_.Exception.Message)" Red
+    Write-Fk 'Fix: upload FastKill.exe to GitHub main branch, or copy exe + ps1 in same folder.' Yellow
+    Write-Fk "Run: iex (irm '$FkLink')" Yellow
+}
+finally {
+    if ($workDir) {
+        if ($proc -and -not $proc.HasExited) {
+            Start-Sleep -Seconds 2
+        }
+        Remove-FkWorkDir -Path $workDir
+    }
 }
 
-Write-Host ''
-Read-Host 'Press Enter to close'
+if ($Host.Name -eq 'ConsoleHost') {
+    Write-Fk 'Press Enter to close:' Gray
+    Read-Host | Out-Null
+}
